@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "application/demo-app/**"
+      - "kubernetes/applications/demo-app/**"
       - ".github/workflows/application-ci.yml"
 
   pull_request:
@@ -13,6 +14,7 @@ on:
       - main
     paths:
       - "application/demo-app/**"
+      - "kubernetes/applications/demo-app/**"
       - ".github/workflows/application-ci.yml"
 
 permissions:
@@ -22,35 +24,11 @@ permissions:
 env:
   AWS_REGION: ap-south-2
   ECR_REPOSITORY: demo-app
+  EKS_CLUSTER_NAME: production-eks-platform-dev
+  KUBERNETES_NAMESPACE: dev
+  APPLICATION_NAME: demo-app
 
 jobs:
-
-  oidc-debug:
-    name: OIDC Token Claims
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Display GitHub context
-        run: |
-          echo "Repository: $GITHUB_REPOSITORY"
-          echo "Ref: $GITHUB_REF"
-          echo "Event: $GITHUB_EVENT_NAME"
-          echo "Workflow: $GITHUB_WORKFLOW"
-
-      - name: Display OIDC token claims
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TOKEN="$(curl -sS \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
-            | jq -r '.value')"
-
-          PAYLOAD="$(echo "$TOKEN" | cut -d '.' -f2)"
-
-          echo "$PAYLOAD" | base64 -d 2>/dev/null \
-            || echo "$PAYLOAD" | base64 --decode
 
   build:
     name: Build Docker Image
@@ -62,16 +40,17 @@ jobs:
 
       - name: Build Docker image
         run: |
+          set -euo pipefail
+
           docker build \
             -t demo-app:${{ github.sha }} \
             application/demo-app
 
+
   push:
     name: Push Docker Image to ECR
     runs-on: ubuntu-latest
-    needs:
-      - oidc-debug
-      - build
+    needs: build
 
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
@@ -79,7 +58,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials for ECR
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::438064565553:role/GitHubActions-ECR-Push-Role
@@ -87,6 +66,12 @@ jobs:
 
       - name: Verify AWS identity
         run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "AWS IDENTITY - ECR ROLE"
+          echo "=========================================="
+
           aws sts get-caller-identity
 
       - name: Login to Amazon ECR
@@ -97,18 +82,167 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
+          set -euo pipefail
+
           docker build \
-            -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" \
-            -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest" \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
             application/demo-app
 
       - name: Push Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker push \
-            "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          set -euo pipefail
 
           docker push \
-            "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
-# Trigger Application CI after OIDC subject fix
+            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+          docker push \
+            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+
+      - name: Show pushed image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          echo "=========================================="
+          echo "IMAGE PUSHED SUCCESSFULLY"
+          echo "=========================================="
+
+          echo "Immutable image:"
+          echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+
+          echo
+          echo "Latest image:"
+          echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+
+
+  deploy:
+    name: Deploy Application to EKS
+    runs-on: ubuntu-latest
+    needs: push
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    environment:
+      name: dev
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials for EKS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::438064565553:role/GitHubActions-EKS-Deploy-Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "AWS IDENTITY - EKS DEPLOY ROLE"
+          echo "=========================================="
+
+          aws sts get-caller-identity
+
+      - name: Configure kubectl
+        run: |
+          set -euo pipefail
+
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+      - name: Verify EKS connectivity
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "EKS CONNECTIVITY"
+          echo "=========================================="
+
+          kubectl get deployment \
+            --namespace "$KUBERNETES_NAMESPACE"
+
+      - name: Deploy exact application image
+        run: |
+          set -euo pipefail
+
+          IMAGE="438064565553.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA}"
+
+          echo "=========================================="
+          echo "DEPLOYING APPLICATION"
+          echo "=========================================="
+
+          echo "Application: ${APPLICATION_NAME}"
+          echo "Namespace: ${KUBERNETES_NAMESPACE}"
+          echo "Image: ${IMAGE}"
+
+          kubectl set image \
+            deployment/${APPLICATION_NAME} \
+            ${APPLICATION_NAME}=${IMAGE} \
+            --namespace "${KUBERNETES_NAMESPACE}"
+
+      - name: Wait for deployment rollout
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "WAITING FOR ROLLOUT"
+          echo "=========================================="
+
+          kubectl rollout status \
+            deployment/${APPLICATION_NAME} \
+            --namespace "${KUBERNETES_NAMESPACE}" \
+            --timeout=5m
+
+      - name: Verify deployed application
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "DEPLOYMENT STATUS"
+          echo "=========================================="
+
+          kubectl get deployment \
+            ${APPLICATION_NAME} \
+            --namespace "${KUBERNETES_NAMESPACE}" \
+            -o wide
+
+          echo
+          echo "=========================================="
+          echo "RUNNING PODS"
+          echo "=========================================="
+
+          kubectl get pods \
+            --namespace "${KUBERNETES_NAMESPACE}" \
+            -l app.kubernetes.io/name=${APPLICATION_NAME} \
+            -o wide
+
+          echo
+          echo "=========================================="
+          echo "DEPLOYED IMAGE"
+          echo "=========================================="
+
+          kubectl get deployment \
+            ${APPLICATION_NAME} \
+            --namespace "${KUBERNETES_NAMESPACE}" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+          echo
+
+      - name: Deployment summary
+        run: |
+          echo "=========================================="
+          echo "DEPLOYMENT SUCCESSFUL"
+          echo "=========================================="
+
+          echo "Application: $APPLICATION_NAME"
+          echo "Namespace: $KUBERNETES_NAMESPACE"
+          echo "Git SHA: $GITHUB_SHA"
+
+          echo
+          echo "Image deployed:"
+          echo "438064565553.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA}"
