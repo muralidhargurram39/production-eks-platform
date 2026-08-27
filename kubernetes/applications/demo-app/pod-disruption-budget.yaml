@@ -1,0 +1,18 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+
+metadata:
+  name: demo-app-pdb
+  namespace: dev
+
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/component: application
+    app.kubernetes.io/environment: dev
+
+spec:
+  minAvailable: 2
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-app

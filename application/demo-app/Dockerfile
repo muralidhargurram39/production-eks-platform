@@ -1,38 +1,41 @@
 FROM nginx:1.30-alpine
 
 # Remove the default NGINX configuration.
-RUN rm /etc/nginx/conf.d/default.conf
+RUN rm -f /etc/nginx/conf.d/default.conf
 
-# Create directories required by NGINX and make them writable
-# by the non-root nginx user.
+# Store the NGINX PID in a writable location.
+RUN sed -i \
+    's|^pid .*|pid /tmp/nginx.pid;|' \
+    /etc/nginx/nginx.conf
+
+# Create directories required by NGINX.
 RUN mkdir -p \
       /var/cache/nginx \
-      /var/run \
-      /var/log/nginx \
+      /tmp \
     && chown -R nginx:nginx \
       /var/cache/nginx \
-      /var/run \
-      /var/log/nginx \
+      /tmp \
       /usr/share/nginx/html
 
-# Create a non-root NGINX configuration.
-RUN cat > /etc/nginx/conf.d/default.conf <<'NGINX_CONF'
-server {
-    listen 8080;
-    server_name _;
+# Create the application NGINX configuration.
+RUN printf '%s\n' \
+    'server {' \
+    '    listen 8080;' \
+    '    server_name _;' \
+    '' \
+    '    root /usr/share/nginx/html;' \
+    '    index index.html;' \
+    '' \
+    '    location / {' \
+    '        try_files $uri $uri/ =404;' \
+    '    }' \
+    '}' \
+    > /etc/nginx/conf.d/default.conf
 
-    root /usr/share/nginx/html;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ =404;
-    }
-}
-NGINX_CONF
-
+# Copy the application.
 COPY --chown=nginx:nginx index.html /usr/share/nginx/html/index.html
 
-# Run the application as the built-in nginx user.
+# Run as non-root.
 USER nginx
 
 EXPOSE 8080

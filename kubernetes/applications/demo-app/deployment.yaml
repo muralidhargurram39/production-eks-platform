@@ -48,7 +48,7 @@ spec:
       containers:
         - name: demo-app
 
-          image: 438064565553.dkr.ecr.ap-south-2.amazonaws.com/demo-app:v2
+          image: 438064565553.dkr.ecr.ap-south-2.amazonaws.com/demo-app:v3
           imagePullPolicy: Always
 
           ports:
