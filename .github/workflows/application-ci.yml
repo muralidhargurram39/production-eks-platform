@@ -23,10 +23,14 @@ permissions:
 
 env:
   AWS_REGION: ap-south-2
+
   ECR_REPOSITORY: demo-app
+
   EKS_CLUSTER_NAME: production-eks-platform-dev
-  KUBERNETES_NAMESPACE: dev
-  APPLICATION_NAME: demo-app
+
+  K8S_NAMESPACE: dev
+  K8S_DEPLOYMENT: demo-app
+  K8S_CONTAINER: demo-app
 
 jobs:
 
@@ -53,6 +57,9 @@ jobs:
     needs: build
 
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    outputs:
+      ecr_registry: ${{ steps.login-ecr.outputs.registry }}
 
     steps:
       - name: Checkout repository
@@ -85,8 +92,8 @@ jobs:
           set -euo pipefail
 
           docker build \
-            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
-            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
             application/demo-app
 
       - name: Push Docker image
@@ -96,25 +103,27 @@ jobs:
           set -euo pipefail
 
           docker push \
-            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
 
           docker push \
-            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
       - name: Show pushed image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
+          set -euo pipefail
+
           echo "=========================================="
           echo "IMAGE PUSHED SUCCESSFULLY"
           echo "=========================================="
 
           echo "Immutable image:"
-          echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          echo "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
 
           echo
           echo "Latest image:"
-          echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+          echo "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
 
   deploy:
@@ -128,151 +137,207 @@ jobs:
       contents: read
       id-token: write
 
+    env:
+      ECR_REGISTRY: ${{ needs.push.outputs.ecr_registry }}
+
     steps:
-     - name: Checkout repository
-       uses: actions/checkout@v4
 
-     - name: Configure AWS credentials for EKS
-       uses: aws-actions/configure-aws-credentials@v4
-       with:
-        role-to-assume: arn:aws:iam::438064565553:role/GitHubActions-EKS-Deploy-Role
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-     - name: Configure kubectl
-       run: |
-        set -euo pipefail
+      - name: Configure AWS credentials for EKS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::438064565553:role/GitHubActions-EKS-Deploy-Role
+          aws-region: ${{ env.AWS_REGION }}
 
-        aws eks update-kubeconfig \
-          --name "$EKS_CLUSTER_NAME" \
-          --region "$AWS_REGION"
+      - name: Configure kubectl
+        run: |
+          set -euo pipefail
 
-     - name: Verify EKS connectivity
-       run: |
-        set -euo pipefail
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
 
-        echo "=========================================="
-        echo "EKS CONNECTIVITY"
-        echo "=========================================="
+      - name: Verify EKS connectivity
+        run: |
+          set -euo pipefail
 
-        kubectl get deployment \
-          --namespace "$K8S_NAMESPACE"
+          echo "=========================================="
+          echo "EKS CONNECTIVITY"
+          echo "=========================================="
 
-     - name: Record current deployment revision
-       run: |
-        set -euo pipefail
+          kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE"
 
-        echo "=========================================="
-        echo "CURRENT DEPLOYMENT"
-        echo "=========================================="
+      - name: Record current deployment
+        run: |
+          set -euo pipefail
 
-        kubectl rollout history deployment/"$K8S_DEPLOYMENT" \
-          --namespace "$K8S_NAMESPACE"
+          echo "=========================================="
+          echo "CURRENT DEPLOYMENT"
+          echo "=========================================="
 
-        CURRENT_IMAGE=$(kubectl get deployment "$K8S_DEPLOYMENT" \
-          --namespace "$K8S_NAMESPACE" \
-          -o jsonpath='{.spec.template.spec.containers[0].image}')
+          kubectl rollout history \
+            deployment/"$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE"
 
-        echo "CURRENT_IMAGE=$CURRENT_IMAGE" >> "$GITHUB_ENV"
+          CURRENT_IMAGE=$(kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-        echo "Current image:"
-        echo "$CURRENT_IMAGE"
+          echo "CURRENT_IMAGE=$CURRENT_IMAGE" >> "$GITHUB_ENV"
 
-     - name: Deploy new application version
-       id: deploy
-       run: |
-        set -euo pipefail
+          echo
+          echo "Current image:"
+          echo "$CURRENT_IMAGE"
 
-        echo "=========================================="
-        echo "DEPLOYING APPLICATION"
-        echo "=========================================="
+      - name: Deploy new application version
+        run: |
+          set -euo pipefail
 
-        NEW_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          NEW_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
 
-        echo "Application: $K8S_DEPLOYMENT"
-        echo "Namespace: $K8S_NAMESPACE"
-        echo "Image: $NEW_IMAGE"
+          echo "=========================================="
+          echo "DEPLOYING APPLICATION"
+          echo "=========================================="
 
-        kubectl set image \
-          deployment/"$K8S_DEPLOYMENT" \
-          "$K8S_CONTAINER=$NEW_IMAGE" \
-          --namespace "$K8S_NAMESPACE"
+          echo "Application: $K8S_DEPLOYMENT"
+          echo "Namespace: $K8S_NAMESPACE"
+          echo "New image: $NEW_IMAGE"
 
-     - name: Wait for rollout
-       id: rollout
-       run: |
-        set -euo pipefail
+          kubectl set image \
+            deployment/"$K8S_DEPLOYMENT" \
+            "$K8S_CONTAINER=$NEW_IMAGE" \
+            --namespace "$K8S_NAMESPACE"
 
-        echo "=========================================="
-        echo "WAITING FOR ROLLOUT"
-        echo "=========================================="
+      - name: Wait for rollout
+        id: rollout
+        run: |
+          set -euo pipefail
 
-        kubectl rollout status \
-          deployment/"$K8S_DEPLOYMENT" \
-          --namespace "$K8S_NAMESPACE" \
-          --timeout=5m
+          echo "=========================================="
+          echo "WAITING FOR ROLLOUT"
+          echo "=========================================="
 
-     - name: Rollback on deployment failure
-       if: failure()
-       run: |
-        echo "=========================================="
-        echo "DEPLOYMENT FAILED"
-        echo "STARTING AUTOMATIC ROLLBACK"
-        echo "=========================================="
+          kubectl rollout status \
+            deployment/"$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" \
+            --timeout=5m
 
-        kubectl rollout undo \
-          deployment/"$K8S_DEPLOYMENT" \
-          --namespace "$K8S_NAMESPACE"
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          echo "=========================================="
+          echo "DEPLOYMENT FAILURE DIAGNOSTICS"
+          echo "=========================================="
 
-        echo "=========================================="
-        echo "WAITING FOR ROLLBACK"
-        echo "=========================================="
+          kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" \
+            -o wide || true
 
-        kubectl rollout status \
-          deployment/"$K8S_DEPLOYMENT" \
-          --namespace "$K8S_NAMESPACE" \
-          --timeout=5m
+          echo
+          echo "========== PODS =========="
 
-        echo "=========================================="
-        echo "ROLLBACK COMPLETED"
-        echo "=========================================="
+          kubectl get pods \
+            --namespace "$K8S_NAMESPACE" \
+            -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
+            -o wide || true
 
-        kubectl get deployment \
-          "$K8S_DEPLOYMENT" \
-          --namespace "$K8S_NAMESPACE" \
-          -o wide
+          echo
+          echo "========== DEPLOYMENT DESCRIPTION =========="
 
-     - name: Verify deployment
-       if: success()
-       run: |
-        set -euo pipefail
+          kubectl describe deployment \
+            "$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" || true
 
-        echo "=========================================="
-        echo "DEPLOYMENT STATUS"
-        echo "=========================================="
+          echo
+          echo "========== RECENT EVENTS =========="
 
-        kubectl get deployment \
-          "$K8S_DEPLOYMENT" \
-          --namespace "$K8S_NAMESPACE" \
-          -o wide
+          kubectl get events \
+            --namespace "$K8S_NAMESPACE" \
+            --sort-by='.lastTimestamp' || true
 
-        echo
-        echo "=========================================="
-        echo "RUNNING PODS"
-        echo "=========================================="
+      - name: Rollback on deployment failure
+        if: failure()
+        run: |
+          set -euo pipefail
 
-        kubectl get pods \
-          --namespace "$K8S_NAMESPACE" \
-          -l app.kubernetes.io/name=demo-app \
-          -o wide
+          echo "=========================================="
+          echo "DEPLOYMENT FAILED"
+          echo "STARTING AUTOMATIC ROLLBACK"
+          echo "=========================================="
 
-        echo
-        echo "=========================================="
-        echo "DEPLOYED IMAGE"
-        echo "=========================================="
+          echo "Previous image:"
+          echo "$CURRENT_IMAGE"
 
-        kubectl get deployment \
-          "$K8S_DEPLOYMENT" \
-          --namespace "$K8S_NAMESPACE" \
-          -o jsonpath='{.spec.template.spec.containers[0].image}'
+          kubectl rollout undo \
+            deployment/"$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE"
 
-        echo
+          echo
+          echo "=========================================="
+          echo "WAITING FOR ROLLBACK"
+          echo "=========================================="
+
+          kubectl rollout status \
+            deployment/"$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" \
+            --timeout=5m
+
+          ROLLBACK_IMAGE=$(kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+
+          echo
+          echo "=========================================="
+          echo "ROLLBACK COMPLETED"
+          echo "=========================================="
+
+          echo "Restored image:"
+          echo "$ROLLBACK_IMAGE"
+
+          kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" \
+            -o wide
+
+      - name: Verify deployment
+        if: success()
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "DEPLOYMENT STATUS"
+          echo "=========================================="
+
+          kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" \
+            -o wide
+
+          echo
+          echo "=========================================="
+          echo "RUNNING PODS"
+          echo "=========================================="
+
+          kubectl get pods \
+            --namespace "$K8S_NAMESPACE" \
+            -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
+            -o wide
+
+          echo
+          echo "=========================================="
+          echo "DEPLOYED IMAGE"
+          echo "=========================================="
+
+          kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+          echo
