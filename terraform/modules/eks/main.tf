@@ -137,7 +137,7 @@ resource "aws_iam_role_policy_attachment" "ebs_csi" {
 
 resource "aws_iam_policy" "aws_load_balancer_controller" {
   name        = "${var.project_name}-${var.environment}-aws-load-balancer-controller-policy"
-  description = "IAM policy for AWS Load Balancer Controller" 
+  description = "IAM policy for AWS Load Balancer Controller"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -293,7 +293,7 @@ resource "aws_iam_policy" "aws_load_balancer_controller" {
         Action = [
           "elasticloadbalancing:CreateLoadBalancer",
           "elasticloadbalancing:CreateTargetGroup",
-           "elasticloadbalancing:AddTags",
+          "elasticloadbalancing:AddTags",
           "elasticloadbalancing:RemoveTags"
         ]
 
