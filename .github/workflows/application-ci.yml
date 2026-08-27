@@ -38,7 +38,7 @@ jobs:
             -t demo-app:${{ github.sha }} \
             application/demo-app
 
-  push-to-ecr:
+  push:
     name: Push Docker Image to ECR
     runs-on: ubuntu-latest
     needs: build
@@ -60,19 +60,19 @@ jobs:
           echo "=========================================="
           echo "AWS IDENTITY"
           echo "=========================================="
-
           aws sts get-caller-identity
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Docker image
+      - name: Build Docker image for ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           docker build \
             -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
             application/demo-app
 
       - name: Push Docker image
@@ -82,12 +82,5 @@ jobs:
           docker push \
             $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
 
-      - name: Display pushed image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          echo "=========================================="
-          echo "IMAGE PUSHED SUCCESSFULLY"
-          echo "=========================================="
-
-          echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          docker push \
+            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
