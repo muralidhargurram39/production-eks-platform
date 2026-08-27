@@ -18,6 +18,7 @@ spec:
 
   strategy:
     type: RollingUpdate
+
     rollingUpdate:
       maxUnavailable: 1
       maxSurge: 1
@@ -36,19 +37,36 @@ spec:
     spec:
       terminationGracePeriodSeconds: 30
 
+      # Pod-level security configuration.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+
+        seccompProfile:
+          type: RuntimeDefault
+
       containers:
         - name: demo-app
 
-          # Placeholder image. GitHub Actions replaces this
-          # with the immutable Git SHA image during deployment.
+          # GitHub Actions replaces this with the immutable Git SHA image.
           image: 438064565553.dkr.ecr.ap-south-2.amazonaws.com/demo-app:v2
-
           imagePullPolicy: Always
 
           ports:
             - name: http
-              containerPort: 80
+              containerPort: 8080
               protocol: TCP
+
+          # Container-level security configuration.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+            capabilities:
+              drop:
+                - ALL
 
           resources:
             requests:
@@ -59,6 +77,14 @@ spec:
               cpu: 500m
               memory: 512Mi
 
+          # Writable temporary directories required by NGINX.
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+
+            - name: nginx-run
+              mountPath: /var/run
+
           readinessProbe:
             httpGet:
               path: /
@@ -67,7 +93,6 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
-            successThreshold: 1
 
           livenessProbe:
             httpGet:
@@ -77,3 +102,10 @@ spec:
             periodSeconds: 20
             timeoutSeconds: 3
             failureThreshold: 3
+
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+
+        - name: nginx-run
+          emptyDir: {}
