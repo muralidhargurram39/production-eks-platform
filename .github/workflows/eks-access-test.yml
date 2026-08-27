@@ -1,0 +1,93 @@
+name: EKS Access Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-2
+  EKS_CLUSTER_NAME: production-eks-platform-dev
+
+jobs:
+  verify-eks-access:
+    name: Verify EKS Access
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show GitHub context
+        run: |
+          echo "=========================================="
+          echo "GITHUB CONTEXT"
+          echo "=========================================="
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Ref: $GITHUB_REF"
+          echo "Event: $GITHUB_EVENT_NAME"
+          echo "Workflow: $GITHUB_WORKFLOW"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::438064565553:role/GitHubActions-EKS-Deploy-Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          echo "=========================================="
+          echo "AWS IDENTITY"
+          echo "=========================================="
+
+          aws sts get-caller-identity
+
+      - name: Verify EKS cluster access
+        run: |
+          echo "=========================================="
+          echo "EKS CLUSTER"
+          echo "=========================================="
+
+          aws eks describe-cluster \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION" \
+            --query 'cluster.{Name:name,Status:status,Endpoint:endpoint}' \
+            --output table
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+      - name: Verify Kubernetes access
+        run: |
+          echo "=========================================="
+          echo "KUBERNETES ACCESS"
+          echo "=========================================="
+
+          kubectl get deployment \
+            --namespace dev
+
+          kubectl get pods \
+            --namespace dev
+
+      - name: Verify namespace permissions
+        run: |
+          echo "=========================================="
+          echo "PERMISSION CHECK"
+          echo "=========================================="
+
+          kubectl auth can-i get deployments \
+            --namespace dev
+
+          kubectl auth can-i patch deployments \
+            --namespace dev
+
+          kubectl auth can-i delete deployments \
+            --namespace dev
+
+          kubectl auth can-i get deployments \
+            --namespace kube-system
