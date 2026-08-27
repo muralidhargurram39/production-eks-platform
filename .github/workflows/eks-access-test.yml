@@ -76,18 +76,39 @@ jobs:
 
       - name: Verify namespace permissions
         run: |
+          set -euo pipefail
+
           echo "=========================================="
           echo "PERMISSION CHECK"
           echo "=========================================="
 
+          echo
+          echo "Checking allowed permissions in dev namespace..."
+
           kubectl auth can-i get deployments \
-            --namespace dev
+            --namespace dev | grep -qx "yes"
 
           kubectl auth can-i patch deployments \
-            --namespace dev
+            --namespace dev | grep -qx "yes"
 
           kubectl auth can-i delete deployments \
-            --namespace dev
+            --namespace dev | grep -qx "yes"
 
-          kubectl auth can-i get deployments \
-            --namespace kube-system
+          echo
+          echo "Checking denied permission outside dev namespace..."
+
+          if kubectl auth can-i get deployments \
+            --namespace kube-system | grep -qx "yes"; then
+            echo "ERROR: Deployment role unexpectedly has access to kube-system."
+            exit 1
+          fi
+
+          echo
+          echo "=========================================="
+          echo "ALL PERMISSION CHECKS PASSED"
+          echo "=========================================="
+
+          echo "Allowed: get deployments in dev"
+          echo "Allowed: patch deployments in dev"
+          echo "Allowed: delete deployments in dev"
+          echo "Denied as expected: get deployments in kube-system"
