@@ -1,8 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
+
 metadata:
   name: demo-app
   namespace: dev
+
   labels:
     app.kubernetes.io/name: demo-app
     app.kubernetes.io/component: application
@@ -10,6 +12,9 @@ metadata:
 
 spec:
   replicas: 3
+
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 300
 
   strategy:
     type: RollingUpdate
@@ -29,9 +34,16 @@ spec:
         app.kubernetes.io/environment: dev
 
     spec:
+      terminationGracePeriodSeconds: 30
+
       containers:
         - name: demo-app
+
+          # Placeholder image. GitHub Actions replaces this
+          # with the immutable Git SHA image during deployment.
           image: 438064565553.dkr.ecr.ap-south-2.amazonaws.com/demo-app:v2
+
+          imagePullPolicy: Always
 
           ports:
             - name: http
@@ -55,6 +67,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
+            successThreshold: 1
 
           livenessProbe:
             httpGet:

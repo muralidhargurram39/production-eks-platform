@@ -12,10 +12,7 @@
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": [
-            "repo:muralidhargurram39/production-eks-platform:ref:refs/heads/main",
-            "repo:muralidhargurram39/production-eks-platform:pull_request"
-          ]
+          "token.actions.githubusercontent.com:sub": "repo:muralidhargurram39/production-eks-platform:*"
         }
       }
     }
