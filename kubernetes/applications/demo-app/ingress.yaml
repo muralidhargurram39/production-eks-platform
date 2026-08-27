@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-app
+  namespace: dev
+
+  annotations:
+    kubernetes.io/ingress.class: alb
+
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    alb.ingress.kubernetes.io/target-type: ip
+
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-south-2:438064565553:certificate/f8a50404-5271-4033-830b-414fe12c4806
+
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+
+    alb.ingress.kubernetes.io/healthcheck-path: /
+
+spec:
+  ingressClassName: alb
+
+  rules:
+    - host: dev.muralidharops.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: demo-app
+                port:
+                  name: http

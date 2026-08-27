@@ -1,0 +1,18 @@
+{
+  "Comment": "ACM certificate validation for dev.muralidharops.com",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "_cc8cfffd7499fd6788a1a9d11d124291.dev.muralidharops.com",
+        "Type": "CNAME",
+        "TTL": 300,
+        "ResourceRecords": [
+          {
+            "Value": "_f47632bf1124f90614d492de38945f67.jkddzztszm.acm-validations.aws"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  namespace: dev
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/component: application
+    app.kubernetes.io/environment: dev
+
+spec:
+  replicas: 3
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-app
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-app
+        app.kubernetes.io/component: application
+        app.kubernetes.io/environment: dev
+
+    spec:
+      containers:
+        - name: demo-app
+          image: 438064565553.dkr.ecr.ap-south-2.amazonaws.com/demo-app:v2
+
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
