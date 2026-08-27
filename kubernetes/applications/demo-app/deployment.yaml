@@ -37,20 +37,17 @@ spec:
     spec:
       terminationGracePeriodSeconds: 30
 
-      # Pod-level security configuration.
       securityContext:
         runAsNonRoot: true
         runAsUser: 101
         runAsGroup: 101
         fsGroup: 101
-
         seccompProfile:
           type: RuntimeDefault
 
       containers:
         - name: demo-app
 
-          # GitHub Actions replaces this with the immutable Git SHA image.
           image: 438064565553.dkr.ecr.ap-south-2.amazonaws.com/demo-app:v2
           imagePullPolicy: Always
 
@@ -59,7 +56,6 @@ spec:
               containerPort: 8080
               protocol: TCP
 
-          # Container-level security configuration.
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -67,6 +63,16 @@ spec:
             capabilities:
               drop:
                 - ALL
+
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+
+            - name: nginx-run
+              mountPath: /run
+
+            - name: nginx-tmp
+              mountPath: /tmp
 
           resources:
             requests:
@@ -77,18 +83,11 @@ spec:
               cpu: 500m
               memory: 512Mi
 
-          # Writable temporary directories required by NGINX.
-          volumeMounts:
-            - name: nginx-cache
-              mountPath: /var/cache/nginx
-
-            - name: nginx-run
-              mountPath: /var/run
-
           readinessProbe:
             httpGet:
               path: /
               port: http
+
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
@@ -98,6 +97,7 @@ spec:
             httpGet:
               path: /
               port: http
+
             initialDelaySeconds: 15
             periodSeconds: 20
             timeoutSeconds: 3
@@ -108,4 +108,7 @@ spec:
           emptyDir: {}
 
         - name: nginx-run
+          emptyDir: {}
+
+        - name: nginx-tmp
           emptyDir: {}
