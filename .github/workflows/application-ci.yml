@@ -24,6 +24,34 @@ env:
   ECR_REPOSITORY: demo-app
 
 jobs:
+
+  oidc-debug:
+    name: OIDC Token Claims
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Display GitHub context
+        run: |
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Ref: $GITHUB_REF"
+          echo "Event: $GITHUB_EVENT_NAME"
+          echo "Workflow: $GITHUB_WORKFLOW"
+
+      - name: Display OIDC token claims
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TOKEN="$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+            | jq -r '.value')"
+
+          PAYLOAD="$(echo "$TOKEN" | cut -d '.' -f2)"
+
+          echo "$PAYLOAD" | base64 -d 2>/dev/null \
+            || echo "$PAYLOAD" | base64 --decode
+
   build:
     name: Build Docker Image
     runs-on: ubuntu-latest
@@ -41,7 +69,9 @@ jobs:
   push:
     name: Push Docker Image to ECR
     runs-on: ubuntu-latest
-    needs: build
+    needs:
+      - oidc-debug
+      - build
 
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
@@ -57,9 +87,6 @@ jobs:
 
       - name: Verify AWS identity
         run: |
-          echo "=========================================="
-          echo "AWS IDENTITY"
-          echo "=========================================="
           aws sts get-caller-identity
 
       - name: Login to Amazon ECR
@@ -71,8 +98,8 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           docker build \
-            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
-            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
+            -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" \
+            -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest" \
             application/demo-app
 
       - name: Push Docker image
@@ -80,8 +107,7 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           docker push \
-            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
 
           docker push \
-            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
-# Trigger Application CI after OIDC trust policy update
+            "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
