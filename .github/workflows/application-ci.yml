@@ -879,24 +879,75 @@ jobs:
           echo "POST-ROLLBACK ENDPOINT VALIDATION"
           echo "=========================================="
 
-          ROLLBACK_ENDPOINTS="$(kubectl get endpointslice \
-            --namespace "$K8S_NAMESPACE" \
-            -l "kubernetes.io/service-name=$K8S_SERVICE" \
-            -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}{range .addresses[*]}{.}{"\n"}{end}{end}')"
+          ROLLBACK_ENDPOINTS=""
+          ROLLBACK_ENDPOINT_COUNT=0
 
-          ROLLBACK_ENDPOINT_COUNT="$(printf '%s\n' "$ROLLBACK_ENDPOINTS" | sed '/^$/d' | wc -l | tr -d ' ')"
+          ENDPOINT_RETRY_ATTEMPTS=30
+          ENDPOINT_RETRY_INTERVAL=2
 
+          echo "Waiting for ready Service endpoints..."
+          echo "Maximum wait: $((ENDPOINT_RETRY_ATTEMPTS * ENDPOINT_RETRY_INTERVAL)) seconds"
+
+          for attempt in $(seq 1 "$ENDPOINT_RETRY_ATTEMPTS"); do
+
+            ROLLBACK_ENDPOINTS="$(kubectl get endpointslice \
+              --namespace "$K8S_NAMESPACE" \
+              -l "kubernetes.io/service-name=$K8S_SERVICE" \
+              -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}{range .addresses[*]}{.}{"\n"}{end}{end}' \
+              2>/dev/null || true)"
+
+            ROLLBACK_ENDPOINT_COUNT="$(
+              printf '%s\n' "$ROLLBACK_ENDPOINTS" |
+              sed '/^$/d' |
+              sort -u |
+              wc -l |
+              tr -d ' '
+            )"
+
+            echo "Attempt $attempt/$ENDPOINT_RETRY_ATTEMPTS - Ready endpoints: $ROLLBACK_ENDPOINT_COUNT"
+
+            if [[ "$ROLLBACK_ENDPOINT_COUNT" -ge 1 ]]; then
+              break
+            fi
+
+            if [[ "$attempt" -lt "$ENDPOINT_RETRY_ATTEMPTS" ]]; then
+              sleep "$ENDPOINT_RETRY_INTERVAL"
+            fi
+          done
+
+          echo
           echo "Ready endpoint count:"
           echo "$ROLLBACK_ENDPOINT_COUNT"
 
           if [[ "$ROLLBACK_ENDPOINT_COUNT" -lt 1 ]]; then
             echo
             echo "CRITICAL: No ready service endpoints after rollback."
+
+            echo
+            echo "===== ENDPOINT SLICES ====="
+
+            kubectl get endpointslice \
+              --namespace "$K8S_NAMESPACE" \
+              -l "kubernetes.io/service-name=$K8S_SERVICE" \
+              -o wide || true
+
+            echo
+            echo "===== SERVICE ====="
+
+            kubectl describe service \
+              "$K8S_SERVICE" \
+              --namespace "$K8S_NAMESPACE" || true
+
             exit 1
           fi
 
           echo
+          echo "Ready endpoints:"
+          echo "$ROLLBACK_ENDPOINTS"
+
+          echo
           echo "Post-rollback endpoint validation passed."
+
 
 
           # ----------------------------------------------------------
