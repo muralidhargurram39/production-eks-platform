@@ -58,25 +58,38 @@ jobs:
           set -euo pipefail
 
           echo "=========================================="
-          echo "BUILDING APPLICATION"
+          echo "BUILDING APPLICATION IMAGE"
           echo "=========================================="
 
           IMAGE="demo-app:${GITHUB_SHA}"
+          IMAGE_TAR="demo-app-${GITHUB_SHA}.tar"
 
-          echo "Image:"
+          echo "Docker image:"
           echo "$IMAGE"
 
-          docker build \
-            -t "$IMAGE" \
-            application/demo-app
+          docker build --tag "$IMAGE" application/demo-app
 
           echo
           echo "Docker build completed successfully."
 
+          echo
+          echo "Saving Docker image as artifact..."
 
-  # ==========================================================
-  # PUSH TO ECR
-  # ==========================================================
+          docker save "$IMAGE" --output "$IMAGE_TAR"
+
+          echo
+          echo "Docker image artifact:"
+          ls -lh "$IMAGE_TAR"
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-app-image-${{ github.sha }}
+          path: demo-app-${{ github.sha }}.tar
+          if-no-files-found: error
+          retention-days: 1
+
+
   push:
     name: Push Docker Image to ECR
     runs-on: ubuntu-latest
@@ -130,17 +143,70 @@ jobs:
 
           echo "$IMAGE"
 
-      - name: Build ECR image
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-app-image-${{ github.sha }}
+          path: .
+
+      - name: Load Docker image
         run: |
           set -euo pipefail
 
           echo "=========================================="
-          echo "BUILDING ECR IMAGE"
+          echo "LOADING BUILT IMAGE"
           echo "=========================================="
 
-          docker build \
-            -t "$IMAGE" \
-            application/demo-app
+          SOURCE_IMAGE="demo-app:${GITHUB_SHA}"
+          IMAGE_TAR="demo-app-${GITHUB_SHA}.tar"
+
+          echo "Image artifact:"
+          echo "$IMAGE_TAR"
+
+          test -f "$IMAGE_TAR"
+
+          echo
+          echo "Loading Docker image..."
+
+          docker load \
+            --input "$IMAGE_TAR"
+
+          echo
+          echo "Verifying loaded image..."
+
+          test -n "$(
+            docker image inspect \
+              "$SOURCE_IMAGE" \
+              --format '{{.Id}}'
+          )"
+
+          IMAGE_ID="$(
+            docker image inspect \
+              "$SOURCE_IMAGE" \
+              --format '{{.Id}}'
+          )"
+
+          echo "Source image:"
+          echo "$SOURCE_IMAGE"
+
+          echo "Image ID:"
+          echo "$IMAGE_ID"
+
+          echo
+          echo "Loaded image verification passed."
+
+          echo "=========================================="
+          echo "TAGGING IMAGE FOR ECR"
+          echo "=========================================="
+
+          docker tag "$SOURCE_IMAGE" "$IMAGE"
+
+          echo "Source image:"
+          echo "$SOURCE_IMAGE"
+
+          echo
+          echo "ECR image:"
+          echo "$IMAGE"
 
       - name: Push image to ECR
         run: |
@@ -445,38 +511,133 @@ jobs:
           echo "POD VALIDATION"
           echo "=========================================="
 
+          # --------------------------------------------------
+          # DEPLOYMENT REPLICA STATUS
+          # --------------------------------------------------
+
+          DESIRED_REPLICAS="$(
+            kubectl get deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" -o jsonpath='{.spec.replicas}'
+          )"
+
+          UPDATED_REPLICAS="$(
+            kubectl get deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" -o jsonpath='{.status.updatedReplicas}'
+          )"
+
+          READY_REPLICAS="$(
+            kubectl get deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" -o jsonpath='{.status.readyReplicas}'
+          )"
+
+          AVAILABLE_REPLICAS="$(
+            kubectl get deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" -o jsonpath='{.status.availableReplicas}'
+          )"
+
+          DESIRED_REPLICAS="${DESIRED_REPLICAS:-0}"
+          UPDATED_REPLICAS="${UPDATED_REPLICAS:-0}"
+          READY_REPLICAS="${READY_REPLICAS:-0}"
+          AVAILABLE_REPLICAS="${AVAILABLE_REPLICAS:-0}"
+
+          echo "Desired replicas:   $DESIRED_REPLICAS"
+          echo "Updated replicas:   $UPDATED_REPLICAS"
+          echo "Ready replicas:     $READY_REPLICAS"
+          echo "Available replicas: $AVAILABLE_REPLICAS"
+
+          if [[ "$UPDATED_REPLICAS" -ne "$DESIRED_REPLICAS" ]]; then
+            echo
+            echo "ERROR: Updated replicas do not match desired replicas."
+            exit 1
+          fi
+
+          if [[ "$READY_REPLICAS" -ne "$DESIRED_REPLICAS" ]]; then
+            echo
+            echo "ERROR: Ready replicas do not match desired replicas."
+            exit 1
+          fi
+
+          if [[ "$AVAILABLE_REPLICAS" -ne "$DESIRED_REPLICAS" ]]; then
+            echo
+            echo "ERROR: Available replicas do not match desired replicas."
+            exit 1
+          fi
+
+          # --------------------------------------------------
+          # CURRENT REPLICA SET
+          # --------------------------------------------------
+
+          CURRENT_RS="$(
+            kubectl get replicaset --namespace "$K8S_NAMESPACE" -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" -o json |
+              jq -r '
+                .items
+                | map(select(.status.replicas == (.status.readyReplicas // 0)))
+                | map(select(.status.replicas > 0))
+                | sort_by(.metadata.creationTimestamp)
+                | last
+                | .metadata.name // empty
+              '
+          )"
+
+          if [[ -z "$CURRENT_RS" ]]; then
+            echo
+            echo "ERROR: Could not determine the active ReplicaSet."
+            exit 1
+          fi
+
+          echo
+          echo "Active ReplicaSet:"
+          echo "$CURRENT_RS"
+
+          # --------------------------------------------------
+          # POD VALIDATION
+          #
+          # Validate only pods owned by the active ReplicaSet.
+          # Do not count old ReplicaSet pods during a rollout.
+          # --------------------------------------------------
+
           PODS="$(
-            kubectl get pods \
-              --namespace "$K8S_NAMESPACE" \
-              -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" \
-              -o json
+            kubectl get pods --namespace "$K8S_NAMESPACE" -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" -o json
           )"
 
           POD_COUNT="$(
             printf '%s' "$PODS" |
-              jq '.items | length'
+              jq --arg rs "$CURRENT_RS" '
+                [
+                  .items[]
+                  | select(
+                      any(
+                        .metadata.ownerReferences[]?
+                        | .kind == "ReplicaSet"
+                        and .name == $rs
+                      )
+                    )
+                ]
+                | length
+              '
           )"
 
-          DESIRED_REPLICAS="$(
-            kubectl get deployment \
-              "$K8S_DEPLOYMENT" \
-              --namespace "$K8S_NAMESPACE" \
-              -o jsonpath='{.spec.replicas}'
-          )"
-
-          echo "Pod count:        $POD_COUNT"
-          echo "Desired replicas: $DESIRED_REPLICAS"
+          echo
+          echo "Active ReplicaSet pod count:"
+          echo "$POD_COUNT"
 
           if [[ "$POD_COUNT" -ne "$DESIRED_REPLICAS" ]]; then
             echo
-            echo "ERROR: Pod count does not match desired replicas."
+            echo "ERROR: Active ReplicaSet pod count does not match desired replicas."
             exit 1
           fi
 
+          # --------------------------------------------------
+          # POD READINESS
+          # --------------------------------------------------
+
           NOT_READY="$(
             printf '%s' "$PODS" |
-              jq -r '
+              jq -r --arg rs "$CURRENT_RS" '
                 .items[]
+                | select(
+                    any(
+                      .metadata.ownerReferences[]?
+                      | .kind == "ReplicaSet"
+                      and .name == $rs
+                    )
+                  )
                 | {
                     name: .metadata.name,
                     phase: (.status.phase // ""),
@@ -495,13 +656,15 @@ jobs:
 
           if [[ -n "$NOT_READY" ]]; then
             echo
-            echo "ERROR: One or more pods are not Running and Ready."
+            echo "ERROR: One or more active ReplicaSet pods are not Running and Ready."
             echo "$NOT_READY"
             exit 1
           fi
 
           echo
-          echo "All application pods are Running and Ready."
+          echo "All active ReplicaSet pods are Running and Ready."
+          echo
+          echo "Pod validation passed."
 
 
       # ======================================================
