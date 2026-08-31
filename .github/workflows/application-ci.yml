@@ -216,11 +216,25 @@ jobs:
           echo "EKS CONNECTIVITY"
           echo "=========================================="
 
-          kubectl cluster-info
+          echo "Cluster:   $EKS_CLUSTER_NAME"
+          echo "Namespace: $K8S_NAMESPACE"
+          echo "Deployment: $K8S_DEPLOYMENT"
+
+          echo
+          echo "Checking Kubernetes API access..."
+
+          kubectl get namespace \
+            "$K8S_NAMESPACE"
+
+          echo
+          echo "Checking deployment access..."
 
           kubectl get deployment \
             "$K8S_DEPLOYMENT" \
             --namespace "$K8S_NAMESPACE"
+
+          echo
+          echo "EKS connectivity validation passed."
 
 
       # ======================================================
