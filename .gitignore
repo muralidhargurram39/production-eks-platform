@@ -64,3 +64,4 @@ Thumbs.db
 *.bak
 *~
 github-actions-ecr-trust-policy.json
+.github/workflows/application-ci.yml.backup
