@@ -17,20 +17,23 @@ on:
       - "kubernetes/applications/demo-app/**"
       - ".github/workflows/application-ci.yml"
 
-# Never allow two deployment workflows for the same Git ref
-# to modify the same Kubernetes deployment at the same time.
-concurrency:
-  group: application-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
   id-token: write
+
+# Do not cancel an active deployment workflow.
+# This is important because cancellation during deployment could
+# interfere with failure handling and rollback.
+concurrency:
+  group: application-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   AWS_REGION: ap-south-2
 
   ECR_REPOSITORY: demo-app
+  ECR_REGISTRY: 438064565553.dkr.ecr.ap-south-2.amazonaws.com
+
   EKS_CLUSTER_NAME: production-eks-platform-dev
 
   K8S_NAMESPACE: dev
@@ -41,16 +44,17 @@ env:
   ROLLOUT_TIMEOUT: 5m
   HEALTHCHECK_TIMEOUT: 60s
 
-
-# ==============================================================
-# BUILD
-# ==============================================================
 jobs:
+
+  # ============================================================
+  # BUILD
+  # ============================================================
   build:
     name: Build Docker Image
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -62,27 +66,36 @@ jobs:
           echo "BUILDING APPLICATION"
           echo "=========================================="
 
+          IMAGE="demo-app:${GITHUB_SHA}"
+
+          echo "Image:"
+          echo "$IMAGE"
+
           docker build \
-            -t "demo-app:${GITHUB_SHA}" \
+            -t "$IMAGE" \
             application/demo-app
 
+          echo
+          echo "Docker build successful."
 
-  # ==============================================================
-  # PUSH TO AMAZON ECR
-  # ==============================================================
+
+  # ============================================================
+  # PUSH
+  # ============================================================
   push:
     name: Push Docker Image to ECR
     runs-on: ubuntu-latest
-    needs: build
 
-    # Only main branch pushes are deployable.
-    # Pull requests build the application but do not push or deploy.
+    needs:
+      - build
+
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     outputs:
-      ecr_registry: ${{ steps.login_ecr.outputs.registry }}
+      ecr_registry: ${{ steps.ecr_login.outputs.registry }}
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -97,18 +110,18 @@ jobs:
           set -euo pipefail
 
           echo "=========================================="
-          echo "AWS IDENTITY - ECR ROLE"
+          echo "AWS IDENTITY"
           echo "=========================================="
 
           aws sts get-caller-identity
 
       - name: Login to Amazon ECR
-        id: login_ecr
+        id: ecr_login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build image for ECR
+      - name: Build ECR image
         env:
-          ECR_REGISTRY: ${{ steps.login_ecr.outputs.registry }}
+          ECR_REGISTRY: ${{ steps.ecr_login.outputs.registry }}
         run: |
           set -euo pipefail
 
@@ -127,7 +140,7 @@ jobs:
 
       - name: Push image to ECR
         env:
-          ECR_REGISTRY: ${{ steps.login_ecr.outputs.registry }}
+          ECR_REGISTRY: ${{ steps.ecr_login.outputs.registry }}
         run: |
           set -euo pipefail
 
@@ -144,13 +157,15 @@ jobs:
           echo "$IMAGE"
 
 
-  # ==============================================================
-  # DEPLOY TO AMAZON EKS
-  # ==============================================================
+  # ============================================================
+  # DEPLOY
+  # ============================================================
   deploy:
     name: Deploy to Amazon EKS
     runs-on: ubuntu-latest
-    needs: push
+
+    needs:
+      - push
 
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
@@ -165,22 +180,27 @@ jobs:
       ECR_REGISTRY: ${{ needs.push.outputs.ecr_registry }}
 
     steps:
-      # ------------------------------------------------------------
+
+      # ----------------------------------------------------------
       # CHECKOUT
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
 
-      # ------------------------------------------------------------
-      # AWS / KUBECTL
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
+      # AWS
+      # ----------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::438064565553:role/GitHubActions-EKS-Deploy-Role
           aws-region: ${{ env.AWS_REGION }}
 
+
+      # ----------------------------------------------------------
+      # KUBECTL
+      # ----------------------------------------------------------
       - name: Configure kubectl
         run: |
           set -euo pipefail
@@ -206,70 +226,77 @@ jobs:
             --namespace "$K8S_NAMESPACE"
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # RECORD KNOWN-GOOD DEPLOYMENT
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       - name: Record current deployment
         id: current_deployment
         run: |
           set -euo pipefail
 
           echo "=========================================="
-          echo "RECORDING CURRENT DEPLOYMENT"
+          echo "CURRENT DEPLOYMENT"
           echo "=========================================="
 
-          CURRENT_IMAGE="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          CURRENT_IMAGE="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}'
+          )"
 
-          CURRENT_REVISION="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+          CURRENT_REVISION="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}'
+          )"
 
-          CURRENT_REPLICAS="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.replicas}')"
+          CURRENT_REPLICAS="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.spec.replicas}'
+          )"
 
           if [[ -z "$CURRENT_IMAGE" ]]; then
-            echo "ERROR: Could not determine current deployment image."
+            echo "CRITICAL: Current image could not be determined."
             exit 1
           fi
 
           if [[ -z "$CURRENT_REPLICAS" ]]; then
-            echo "ERROR: Could not determine desired replica count."
+            echo "CRITICAL: Current replica count could not be determined."
             exit 1
           fi
 
           echo "CURRENT_IMAGE=$CURRENT_IMAGE" >> "$GITHUB_ENV"
-          echo "CURRENT_REVISION=${CURRENT_REVISION:-unknown}" >> "$GITHUB_ENV"
+          echo "CURRENT_REVISION=$CURRENT_REVISION" >> "$GITHUB_ENV"
           echo "CURRENT_REPLICAS=$CURRENT_REPLICAS" >> "$GITHUB_ENV"
 
           echo
-          echo "Current image:"
+          echo "Known-good image:"
           echo "$CURRENT_IMAGE"
 
           echo
           echo "Current revision:"
-          echo "${CURRENT_REVISION:-unknown}"
+          echo "$CURRENT_REVISION"
 
           echo
-          echo "Current desired replicas:"
+          echo "Current replicas:"
           echo "$CURRENT_REPLICAS"
 
           echo
           echo "Rollout history:"
+
           kubectl rollout history \
             deployment/"$K8S_DEPLOYMENT" \
             --namespace "$K8S_NAMESPACE"
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # DEPLOYMENT METADATA
-      # ------------------------------------------------------------
-      - name: Set deployment metadata
+      # ----------------------------------------------------------
+      - name: Record deployment metadata
         run: |
           set -euo pipefail
 
@@ -281,6 +308,8 @@ jobs:
           echo "DEPLOYMENT METADATA"
           echo "=========================================="
 
+          echo "Application:     $K8S_DEPLOYMENT"
+          echo "Namespace:       $K8S_NAMESPACE"
           echo "Git SHA:         $GITHUB_SHA"
           echo "Repository:      $GITHUB_REPOSITORY"
           echo "Run ID:          $GITHUB_RUN_ID"
@@ -288,16 +317,34 @@ jobs:
           echo "Deployment Time: $DEPLOYMENT_TIME"
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
+      # ANNOTATION
+      # ----------------------------------------------------------
+      - name: Annotate deployment
+        run: |
+          set -euo pipefail
+
+          kubectl annotate deployment \
+            "$K8S_DEPLOYMENT" \
+            --namespace "$K8S_NAMESPACE" \
+            "deployment.git.sha=$GITHUB_SHA" \
+            "deployment.run.id=$GITHUB_RUN_ID" \
+            "deployment.run.number=$GITHUB_RUN_NUMBER" \
+            "deployment.time=$DEPLOYMENT_TIME" \
+            --overwrite
+
+          echo "Deployment annotation applied."
+
+
+      # ----------------------------------------------------------
       # DEPLOY NEW IMAGE
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       - name: Deploy new application version
+        id: deploy
         run: |
           set -euo pipefail
 
           NEW_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
-
-          echo "NEW_IMAGE=$NEW_IMAGE" >> "$GITHUB_ENV"
 
           echo "=========================================="
           echo "DEPLOYING APPLICATION"
@@ -307,21 +354,26 @@ jobs:
           echo "Namespace:   $K8S_NAMESPACE"
           echo "New image:   $NEW_IMAGE"
 
+          echo "NEW_IMAGE=$NEW_IMAGE" >> "$GITHUB_ENV"
+
           kubectl set image \
             deployment/"$K8S_DEPLOYMENT" \
             "$K8S_CONTAINER=$NEW_IMAGE" \
             --namespace "$K8S_NAMESPACE"
 
           echo
-          echo "Application image updated."
+          echo "New image applied."
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # ROLLOUT
       #
+      # IMPORTANT:
       # continue-on-error is intentional.
-      # We must allow the workflow to reach automatic rollback.
-      # ------------------------------------------------------------
+      #
+      # We need the workflow to continue into the rollback section
+      # if the rollout fails.
+      # ----------------------------------------------------------
       - name: Wait for rollout
         id: rollout
         continue-on-error: true
@@ -338,12 +390,11 @@ jobs:
             --timeout="$ROLLOUT_TIMEOUT"
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # DEPLOYMENT HEALTH
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       - name: Validate deployment health
         id: deployment_health
-        if: always()
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -352,37 +403,41 @@ jobs:
           echo "DEPLOYMENT HEALTH VALIDATION"
           echo "=========================================="
 
-          DESIRED_REPLICAS="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.replicas}')"
+          DESIRED="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.spec.replicas}'
+          )"
 
-          READY_REPLICAS="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.status.readyReplicas}')"
+          READY="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.status.readyReplicas}'
+          )"
 
-          AVAILABLE_REPLICAS="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.status.availableReplicas}')"
+          AVAILABLE="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.status.availableReplicas}'
+          )"
 
-          DESIRED_REPLICAS="${DESIRED_REPLICAS:-0}"
-          READY_REPLICAS="${READY_REPLICAS:-0}"
-          AVAILABLE_REPLICAS="${AVAILABLE_REPLICAS:-0}"
+          DESIRED="${DESIRED:-0}"
+          READY="${READY:-0}"
+          AVAILABLE="${AVAILABLE:-0}"
 
-          echo "Desired replicas:   $DESIRED_REPLICAS"
-          echo "Ready replicas:     $READY_REPLICAS"
-          echo "Available replicas: $AVAILABLE_REPLICAS"
+          echo "Desired replicas:   $DESIRED"
+          echo "Ready replicas:     $READY"
+          echo "Available replicas: $AVAILABLE"
 
-          if [[ "$READY_REPLICAS" -ne "$DESIRED_REPLICAS" ]]; then
-            echo
+          if [[ "$READY" -ne "$DESIRED" ]]; then
             echo "ERROR: Ready replicas do not match desired replicas."
             exit 1
           fi
 
-          if [[ "$AVAILABLE_REPLICAS" -ne "$DESIRED_REPLICAS" ]]; then
-            echo
+          if [[ "$AVAILABLE" -ne "$DESIRED" ]]; then
             echo "ERROR: Available replicas do not match desired replicas."
             exit 1
           fi
@@ -391,12 +446,11 @@ jobs:
           echo "Deployment health validation passed."
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # POD HEALTH
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       - name: Validate application pods
         id: pod_health
-        if: always()
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -405,82 +459,102 @@ jobs:
           echo "POD VALIDATION"
           echo "=========================================="
 
-          PODS="$(kubectl get pods \
+          PODS="$(
+            kubectl get pods \
+              --namespace "$K8S_NAMESPACE" \
+              -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" \
+              -o json
+          )"
+
+            POD_COUNT="$(
+              printf '%s' "$PODS" |
+              wc -l |
+              tr -d ' '
+            )"
+
+          DESIRED_REPLICAS="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.spec.replicas}'
+          )"
+
+          echo "Pod count:       $POD_COUNT"
+          echo "Desired replicas: $DESIRED_REPLICAS"
+
+          if [[ "$POD_COUNT" -ne "$DESIRED_REPLICAS" ]]; then
+            echo "ERROR: Pod count does not match desired replicas."
+            exit 1
+          fi
+
+            NOT_READY="$(
+              printf '%s' "$PODS" |
+              python3 -c '
+              import json
+              import sys
+
+              data = json.load(sys.stdin)
+
+              for pod in data.get("items", []):
+                  name = pod["metadata"]["name"]
+                  phase = pod.get("status", {}).get("phase", "")
+                  conditions = pod.get("status", {}).get("conditions", [])
+
+                  ready = any(
+                      c.get("type") == "Ready" and c.get("status") == "True"
+                      for c in conditions
+                  )
+
+                  if phase != "Running" or not ready:
+                      print(f"{name}|phase={phase}|ready={ready}")
+              '
+            )"
+
+          if [[ -n "$NOT_READY" ]]; then
+            echo "ERROR: One or more pods are not Running and Ready."
+            echo "$NOT_READY"
+            exit 1
+          fi
+
+          kubectl get pods \
             --namespace "$K8S_NAMESPACE" \
-            -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
-            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
-
-          if [[ -z "$PODS" ]]; then
-            echo "ERROR: No application pods found."
-            exit 1
-          fi
-
-          FAILED=0
-
-          while IFS= read -r POD; do
-            [[ -z "$POD" ]] && continue
-
-            PHASE="$(kubectl get pod \
-              "$POD" \
-              --namespace "$K8S_NAMESPACE" \
-              -o jsonpath='{.status.phase}')"
-
-            READY="$(kubectl get pod \
-              "$POD" \
-              --namespace "$K8S_NAMESPACE" \
-              -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}')"
-
-            echo
-            echo "Checking pod: $POD"
-            echo "Phase: $PHASE"
-            echo "Ready: $READY"
-
-            if [[ "$PHASE" != "Running" || "$READY" != "True" ]]; then
-              FAILED=1
-            fi
-          done <<< "$PODS"
-
-          if [[ "$FAILED" -ne 0 ]]; then
-            echo
-            echo "ERROR: One or more application pods are unhealthy."
-            exit 1
-          fi
+            -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" \
+            -o wide
 
           echo
           echo "All application pods are Running and Ready."
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # IMAGE VALIDATION
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       - name: Validate deployed image
         id: image_health
-        if: always()
         continue-on-error: true
         run: |
           set -euo pipefail
-
-          EXPECTED_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
 
           echo "=========================================="
           echo "IMAGE VALIDATION"
           echo "=========================================="
 
-          DEPLOYED_IMAGE="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          DEPLOYED_IMAGE="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}'
+          )"
 
           echo "Expected image:"
-          echo "$EXPECTED_IMAGE"
+          echo "$NEW_IMAGE"
 
           echo
           echo "Deployed image:"
           echo "$DEPLOYED_IMAGE"
 
-          if [[ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]]; then
+          if [[ "$DEPLOYED_IMAGE" != "$NEW_IMAGE" ]]; then
             echo
-            echo "ERROR: Deployment is using the wrong image."
+            echo "ERROR: Deployed image does not match expected image."
             exit 1
           fi
 
@@ -488,12 +562,20 @@ jobs:
           echo "Image validation passed."
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # SERVICE ENDPOINT VALIDATION
-      # ------------------------------------------------------------
+      #
+      # Use EndpointSlice JSON and Python.
+      #
+      # Do NOT use:
+      #
+      # .items[*].endpoints[?(@.conditions.ready==true)]
+      #
+      # because the Kubernetes JSONPath implementation on this
+      # cluster did not reliably evaluate that predicate.
+      # ----------------------------------------------------------
       - name: Validate service endpoints
         id: endpoint_health
-        if: always()
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -502,32 +584,68 @@ jobs:
           echo "SERVICE ENDPOINT VALIDATION"
           echo "=========================================="
 
-          ENDPOINTS="$(kubectl get endpointslice \
-            --namespace "$K8S_NAMESPACE" \
-            -l "kubernetes.io/service-name=$K8S_SERVICE" \
-            -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}{range .addresses[*]}{.}{"\n"}{end}{end}')"
+          DESIRED_REPLICAS="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.spec.replicas}'
+          )"
 
-          ENDPOINT_COUNT="$(printf '%s\n' "$ENDPOINTS" | sed '/^$/d' | wc -l | tr -d ' ')"
+            ENDPOINTS="$(
+              kubectl get endpointslice \
+                --namespace "$K8S_NAMESPACE" \
+                -l "kubernetes.io/service-name=$K8S_SERVICE" \
+                -o json |
+              python3 -c '
+              import json
+              import sys
 
-          echo "Service:"
-          echo "$K8S_SERVICE"
+              data = json.load(sys.stdin)
+
+              addresses = []
+
+              for item in data.get("items", []):
+                  for endpoint in item.get("endpoints", []):
+                      conditions = endpoint.get("conditions", {})
+
+                      if conditions.get("ready") is True:
+                          addresses.extend(endpoint.get("addresses", []))
+
+              for address in sorted(set(addresses)):
+                  print(address)
+              '
+            )"
+
+          ENDPOINT_COUNT="$(
+            printf '%s\n' "$ENDPOINTS" |
+              sed '/^$/d' |
+              wc -l |
+              tr -d ' '
+          )"
+
+          echo "Desired replicas:"
+          echo "$DESIRED_REPLICAS"
 
           echo
           echo "Ready endpoints:"
-
-          if [[ -n "$ENDPOINTS" ]]; then
-            printf '%s\n' "$ENDPOINTS"
-          else
-            echo "NONE"
-          fi
+          echo "$ENDPOINTS"
 
           echo
           echo "Ready endpoint count:"
           echo "$ENDPOINT_COUNT"
 
-          if [[ "$ENDPOINT_COUNT" -lt 1 ]]; then
+          if [[ "$ENDPOINT_COUNT" -ne "$DESIRED_REPLICAS" ]]; then
             echo
-            echo "ERROR: No ready service endpoints found."
+            echo "ERROR: Ready endpoint count does not match desired replicas."
+
+            echo
+            echo "===== ENDPOINT SLICES ====="
+
+            kubectl get endpointslice \
+              --namespace "$K8S_NAMESPACE" \
+              -l "kubernetes.io/service-name=$K8S_SERVICE" \
+              -o wide || true
+
             exit 1
           fi
 
@@ -535,12 +653,11 @@ jobs:
           echo "Service endpoint validation passed."
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # APPLICATION HTTP HEALTH CHECK
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       - name: Application HTTP health check
         id: http_health
-        if: always()
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -551,7 +668,7 @@ jobs:
 
           HEALTHCHECK_POD="healthcheck-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
-          cleanup() {
+          cleanup_healthcheck() {
             kubectl delete pod \
               "$HEALTHCHECK_POD" \
               --namespace "$K8S_NAMESPACE" \
@@ -559,7 +676,7 @@ jobs:
               >/dev/null 2>&1 || true
           }
 
-          trap cleanup EXIT
+          trap cleanup_healthcheck EXIT
 
           echo "Creating temporary health check pod:"
           echo "$HEALTHCHECK_POD"
@@ -585,40 +702,24 @@ jobs:
           echo "Application HTTP health check passed."
 
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # SUCCESS
       #
-      # This step runs only when every deployment validation passed.
-      # ------------------------------------------------------------
+      # This runs only when every deployment validation passed.
+      # ----------------------------------------------------------
       - name: Deployment successful
         if: steps.rollout.outcome == 'success' && steps.deployment_health.outcome == 'success' && steps.pod_health.outcome == 'success' && steps.image_health.outcome == 'success' && steps.endpoint_health.outcome == 'success' && steps.http_health.outcome == 'success'
         run: |
           set -euo pipefail
 
           echo "=========================================="
-          echo "RECORDING SUCCESSFUL DEPLOYMENT"
-          echo "=========================================="
-
-          kubectl annotate deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            "deployment.platform/git-sha=$GITHUB_SHA" \
-            "deployment.platform/repository=$GITHUB_REPOSITORY" \
-            "deployment.platform/github-run-id=$GITHUB_RUN_ID" \
-            "deployment.platform/github-run-number=$GITHUB_RUN_NUMBER" \
-            "deployment.platform/deployed-at=$DEPLOYMENT_TIME" \
-            --overwrite
-
-          echo
-          echo "=========================================="
           echo "DEPLOYMENT SUCCESSFUL"
           echo "=========================================="
 
-          echo "Application: $K8S_DEPLOYMENT"
-          echo "Namespace:   $K8S_NAMESPACE"
-          echo "Git SHA:     $GITHUB_SHA"
-          echo "Deployed image:"
-          echo "$NEW_IMAGE"
+          echo "Application:    $K8S_DEPLOYMENT"
+          echo "Namespace:      $K8S_NAMESPACE"
+          echo "Git SHA:        $GITHUB_SHA"
+          echo "Deployed image: $NEW_IMAGE"
 
           echo
           echo "=========================================="
@@ -636,7 +737,7 @@ jobs:
 
           kubectl get pods \
             --namespace "$K8S_NAMESPACE" \
-            -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
+            -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" \
             -o wide
 
           echo
@@ -648,13 +749,29 @@ jobs:
             "$K8S_SERVICE" \
             --namespace "$K8S_NAMESPACE"
 
+          {
+            echo "## Deployment Successful"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Application | $K8S_DEPLOYMENT |"
+            echo "| Namespace | $K8S_NAMESPACE |"
+            echo "| Git SHA | $GITHUB_SHA |"
+            echo "| Image | $NEW_IMAGE |"
+            echo "| Desired Replicas | 3 |"
+            echo "| Rollout | PASS |"
+            echo "| Pods | PASS |"
+            echo "| Image Validation | PASS |"
+            echo "| EndpointSlice Validation | PASS |"
+            echo "| HTTP Health Check | PASS |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # ------------------------------------------------------------
-      # FAILURE DIAGNOSTICS
+
+      # ----------------------------------------------------------
+      # DIAGNOSTICS
       #
-      # Always collect diagnostics when any deployment validation
-      # failed. This step does not perform rollback.
-      # ------------------------------------------------------------
+      # Run whenever one or more deployment gates fail.
+      # ----------------------------------------------------------
       - name: Collect deployment diagnostics
         if: steps.rollout.outcome != 'success' || steps.deployment_health.outcome != 'success' || steps.pod_health.outcome != 'success' || steps.image_health.outcome != 'success' || steps.endpoint_health.outcome != 'success' || steps.http_health.outcome != 'success'
         run: |
@@ -672,19 +789,11 @@ jobs:
             --namespace "$K8S_NAMESPACE" || true
 
           echo
-          echo "===== REPLICASETS ====="
-
-          kubectl get replicasets \
-            --namespace "$K8S_NAMESPACE" \
-            -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
-            -o wide || true
-
-          echo
           echo "===== PODS ====="
 
           kubectl get pods \
             --namespace "$K8S_NAMESPACE" \
-            -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
+            -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" \
             -o wide || true
 
           echo
@@ -692,14 +801,14 @@ jobs:
 
           kubectl describe pods \
             --namespace "$K8S_NAMESPACE" \
-            -l app.kubernetes.io/name="$K8S_DEPLOYMENT" || true
+            -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" || true
 
           echo
           echo "===== POD LOGS ====="
 
           kubectl logs \
             --namespace "$K8S_NAMESPACE" \
-            -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
+            -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" \
             --all-containers=true \
             --tail=100 \
             --prefix || true
@@ -720,16 +829,9 @@ jobs:
             -o wide || true
 
 
-      # ------------------------------------------------------------
+      # ============================================================
       # AUTOMATIC ROLLBACK
-      #
-      # Runs when the new release fails any validation.
-      #
-      # IMPORTANT:
-      # The rollback itself is allowed to succeed, but this job
-      # intentionally exits with code 1 so the bad release remains
-      # FAILED in GitHub Actions.
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Rollback failed deployment
         if: steps.rollout.outcome != 'success' || steps.deployment_health.outcome != 'success' || steps.pod_health.outcome != 'success' || steps.image_health.outcome != 'success' || steps.endpoint_health.outcome != 'success' || steps.http_health.outcome != 'success'
         run: |
@@ -748,6 +850,9 @@ jobs:
           echo "Known-good image:"
           echo "$CURRENT_IMAGE"
 
+          # --------------------------------------------------------
+          # RESTORE PREVIOUS IMAGE
+          # --------------------------------------------------------
           echo
           echo "=========================================="
           echo "RESTORING PREVIOUS IMAGE"
@@ -761,6 +866,10 @@ jobs:
           echo
           echo "Previous image applied."
 
+
+          # --------------------------------------------------------
+          # WAIT FOR ROLLBACK
+          # --------------------------------------------------------
           echo
           echo "=========================================="
           echo "WAITING FOR ROLLBACK"
@@ -776,59 +885,51 @@ jobs:
             echo "CRITICAL: ROLLBACK FAILED"
             echo "=========================================="
 
-            echo
-            echo "===== DEPLOYMENT ====="
-
             kubectl get deployment \
               "$K8S_DEPLOYMENT" \
               --namespace "$K8S_NAMESPACE" \
               -o wide || true
 
-            echo
-            echo "===== PODS ====="
-
             kubectl get pods \
               --namespace "$K8S_NAMESPACE" \
-              -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
+              -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" \
               -o wide || true
-
-            echo
-            echo "===== POD LOGS ====="
-
-            kubectl logs \
-              --namespace "$K8S_NAMESPACE" \
-              -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
-              --all-containers=true \
-              --tail=100 \
-              --prefix || true
 
             exit 1
           fi
 
-          # ----------------------------------------------------------
-          # ROLLBACK IMAGE VALIDATION
-          # ----------------------------------------------------------
-          ROLLBACK_IMAGE="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.template.spec.containers[0].image}')"
 
-          DESIRED_REPLICAS="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.replicas}')"
+          # --------------------------------------------------------
+          # ROLLBACK IMAGE + REPLICA VALIDATION
+          # --------------------------------------------------------
+          ROLLBACK_IMAGE="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}'
+          )"
 
-          READY_REPLICAS="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.status.readyReplicas}')"
+          DESIRED_REPLICAS="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.spec.replicas}'
+          )"
 
-          AVAILABLE_REPLICAS="$(kubectl get deployment \
-            "$K8S_DEPLOYMENT" \
-            --namespace "$K8S_NAMESPACE" \
-            -o jsonpath='{.status.availableReplicas}')"
+          READY_REPLICAS="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.status.readyReplicas}'
+          )"
 
-          DESIRED_REPLICAS="${DESIRED_REPLICAS:-0}"
+          AVAILABLE_REPLICAS="$(
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.status.availableReplicas}'
+          )"
+
           READY_REPLICAS="${READY_REPLICAS:-0}"
           AVAILABLE_REPLICAS="${AVAILABLE_REPLICAS:-0}"
 
@@ -871,42 +972,62 @@ jobs:
           echo "Rollback image and replica validation passed."
 
 
-          # ----------------------------------------------------------
-          # POST-ROLLBACK SERVICE ENDPOINT VALIDATION
-          # ----------------------------------------------------------
+          # --------------------------------------------------------
+          # POST-ROLLBACK ENDPOINTSLICE VALIDATION
+          #
+          # Require ready endpoint count to equal desired replicas.
+          # --------------------------------------------------------
           echo
           echo "=========================================="
           echo "POST-ROLLBACK ENDPOINT VALIDATION"
           echo "=========================================="
 
-          ROLLBACK_ENDPOINTS=""
-          ROLLBACK_ENDPOINT_COUNT=0
-
           ENDPOINT_RETRY_ATTEMPTS=30
           ENDPOINT_RETRY_INTERVAL=2
 
-          echo "Waiting for ready Service endpoints..."
+          ROLLBACK_ENDPOINTS=""
+          ROLLBACK_ENDPOINT_COUNT=0
+
+          echo "Waiting for ready EndpointSlice endpoints..."
           echo "Maximum wait: $((ENDPOINT_RETRY_ATTEMPTS * ENDPOINT_RETRY_INTERVAL)) seconds"
 
           for attempt in $(seq 1 "$ENDPOINT_RETRY_ATTEMPTS"); do
 
-            ROLLBACK_ENDPOINTS="$(kubectl get endpointslice \
+          ROLLBACK_ENDPOINTS="$(
+            kubectl get endpointslice \
               --namespace "$K8S_NAMESPACE" \
               -l "kubernetes.io/service-name=$K8S_SERVICE" \
-              -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}{range .addresses[*]}{.}{"\n"}{end}{end}' \
-              2>/dev/null || true)"
+              -o json |
+            python3 -c '
+            import json
+            import sys
+
+            data = json.load(sys.stdin)
+
+            addresses = []
+
+            for item in data.get("items", []):
+                for endpoint in item.get("endpoints", []):
+                    conditions = endpoint.get("conditions", {})
+
+                    if conditions.get("ready") is True:
+                        addresses.extend(endpoint.get("addresses", []))
+
+            for address in sorted(set(addresses)):
+                print(address)
+            '
+          )"
 
             ROLLBACK_ENDPOINT_COUNT="$(
               printf '%s\n' "$ROLLBACK_ENDPOINTS" |
-              sed '/^$/d' |
-              sort -u |
-              wc -l |
-              tr -d ' '
+                sed '/^$/d' |
+                wc -l |
+                tr -d ' '
             )"
 
-            echo "Attempt $attempt/$ENDPOINT_RETRY_ATTEMPTS - Ready endpoints: $ROLLBACK_ENDPOINT_COUNT"
+            echo "Attempt $attempt/$ENDPOINT_RETRY_ATTEMPTS - Ready endpoints: $ROLLBACK_ENDPOINT_COUNT/$DESIRED_REPLICAS"
 
-            if [[ "$ROLLBACK_ENDPOINT_COUNT" -ge 1 ]]; then
+            if [[ "$ROLLBACK_ENDPOINT_COUNT" -eq "$DESIRED_REPLICAS" ]]; then
               break
             fi
 
@@ -919,9 +1040,10 @@ jobs:
           echo "Ready endpoint count:"
           echo "$ROLLBACK_ENDPOINT_COUNT"
 
-          if [[ "$ROLLBACK_ENDPOINT_COUNT" -lt 1 ]]; then
+          if [[ "$ROLLBACK_ENDPOINT_COUNT" -ne "$DESIRED_REPLICAS" ]]; then
+
             echo
-            echo "CRITICAL: No ready service endpoints after rollback."
+            echo "CRITICAL: Ready EndpointSlice endpoint count does not match desired replicas."
 
             echo
             echo "===== ENDPOINT SLICES ====="
@@ -930,6 +1052,14 @@ jobs:
               --namespace "$K8S_NAMESPACE" \
               -l "kubernetes.io/service-name=$K8S_SERVICE" \
               -o wide || true
+
+            echo
+            echo "===== ENDPOINT SLICES JSON ====="
+
+            kubectl get endpointslice \
+              --namespace "$K8S_NAMESPACE" \
+              -l "kubernetes.io/service-name=$K8S_SERVICE" \
+              -o json || true
 
             echo
             echo "===== SERVICE ====="
@@ -946,13 +1076,12 @@ jobs:
           echo "$ROLLBACK_ENDPOINTS"
 
           echo
-          echo "Post-rollback endpoint validation passed."
+          echo "Post-rollback EndpointSlice validation passed."
 
 
-
-          # ----------------------------------------------------------
+          # --------------------------------------------------------
           # POST-ROLLBACK HTTP HEALTH CHECK
-          # ----------------------------------------------------------
+          # --------------------------------------------------------
           echo
           echo "=========================================="
           echo "POST-ROLLBACK HTTP HEALTH CHECK"
@@ -996,35 +1125,17 @@ jobs:
             echo "=========================================="
 
             echo
-            echo "===== HEALTH CHECK POD ====="
-
+            echo "Health check pod:"
             kubectl get pod \
               "$ROLLBACK_HEALTHCHECK_POD" \
               --namespace "$K8S_NAMESPACE" \
               -o wide || true
 
             echo
-            echo "===== HEALTH CHECK LOGS ====="
-
+            echo "Health check pod logs:"
             kubectl logs \
               "$ROLLBACK_HEALTHCHECK_POD" \
               --namespace "$K8S_NAMESPACE" || true
-
-            echo
-            echo "===== DEPLOYMENT ====="
-
-            kubectl get deployment \
-              "$K8S_DEPLOYMENT" \
-              --namespace "$K8S_NAMESPACE" \
-              -o wide || true
-
-            echo
-            echo "===== PODS ====="
-
-            kubectl get pods \
-              --namespace "$K8S_NAMESPACE" \
-              -l app.kubernetes.io/name="$K8S_DEPLOYMENT" \
-              -o wide || true
 
             exit 1
           fi
@@ -1032,33 +1143,21 @@ jobs:
           echo
           echo "Post-rollback HTTP health check passed."
 
+
+          # --------------------------------------------------------
+          # ROLLBACK SUCCESS
+          # --------------------------------------------------------
           echo
           echo "=========================================="
           echo "ROLLBACK SUCCESSFUL"
           echo "=========================================="
 
-          echo "Failed image:"
-          echo "$NEW_IMAGE"
-
           echo
-          echo "Restored image:"
+          echo "Previous image restored:"
           echo "$CURRENT_IMAGE"
 
           echo
-          echo "Ready replicas:"
-          echo "$READY_REPLICAS/$DESIRED_REPLICAS"
-
-          echo
-          echo "Available replicas:"
-          echo "$AVAILABLE_REPLICAS/$DESIRED_REPLICAS"
-
-          echo
-          echo "Ready service endpoints:"
-          echo "$ROLLBACK_ENDPOINT_COUNT"
-
-          echo
-          echo "Post-rollback HTTP health:"
-          echo "PASSED"
+          echo "Application is healthy after rollback."
 
           {
             echo "## Deployment Failed — Rollback Successful"
@@ -1070,20 +1169,23 @@ jobs:
             echo "| Failed Git SHA | $GITHUB_SHA |"
             echo "| Failed Image | $NEW_IMAGE |"
             echo "| Restored Image | $CURRENT_IMAGE |"
-            echo "| Ready Replicas | $READY_REPLICAS/$DESIRED_REPLICAS |"
-            echo "| Available Replicas | $AVAILABLE_REPLICAS/$DESIRED_REPLICAS |"
-            echo "| Ready Service Endpoints | $ROLLBACK_ENDPOINT_COUNT |"
-            echo "| Post-Rollback HTTP Health | PASSED |"
+            echo "| Desired Replicas | $DESIRED_REPLICAS |"
+            echo "| Ready Replicas | $READY_REPLICAS |"
+            echo "| Available Replicas | $AVAILABLE_REPLICAS |"
+            echo "| Ready Endpoint Count | $ROLLBACK_ENDPOINT_COUNT |"
+            echo "| Post-Rollback HTTP | PASS |"
+            echo "| Rollback | SUCCESSFUL |"
+            echo
+            echo "> The failed application version was automatically rolled back."
+            echo "> The Kubernetes deployment is healthy on the known-good image."
+            echo "> The workflow remains FAILED intentionally."
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo
           echo "The Kubernetes application has been restored."
-          echo "Rollback was verified through:"
-          echo "  - image validation"
-          echo "  - replica validation"
-          echo "  - EndpointSlice validation"
-          echo "  - application HTTP validation"
-          echo
           echo "The deployment workflow will remain FAILED intentionally."
 
+          # IMPORTANT:
+          # A rollback is operationally successful, but the CI/CD run
+          # must remain FAILED because the new application version failed.
           exit 1
