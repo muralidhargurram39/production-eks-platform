@@ -20,7 +20,7 @@ RUN mkdir -p \
 # Create the application NGINX configuration.
 RUN printf '%s\n' \
     'server {' \
-    '    listen 8080;' \
+    '    listen 8081;' \
     '    server_name _;' \
     '' \
     '    root /usr/share/nginx/html;' \
