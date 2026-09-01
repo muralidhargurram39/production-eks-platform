@@ -136,6 +136,7 @@ jobs:
     outputs:
       ecr_registry: ${{ steps.login-ecr.outputs.registry }}
       image: ${{ steps.image.outputs.image }}
+      image_digest: ${{ steps.push-image.outputs.image_digest }}
 
     steps:
       - name: Checkout repository
@@ -245,6 +246,7 @@ jobs:
           echo "$IMAGE"
 
       - name: Push image to ECR
+        id: push-image
         run: |
           set -euo pipefail
 
@@ -257,6 +259,37 @@ jobs:
           echo
           echo "Image pushed successfully:"
           echo "$IMAGE"
+
+          echo
+          echo "=========================================="
+          echo "RESOLVING ECR IMAGE DIGEST"
+          echo "=========================================="
+
+          IMAGE_DIGEST="$(
+            aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=${GITHUB_SHA}" --region "$AWS_REGION" --query 'imageDetails[0].imageDigest' --output text
+          )"
+
+          if [[ -z "$IMAGE_DIGEST" || "$IMAGE_DIGEST" == "None" ]]; then
+            echo
+            echo "ERROR: Could not determine ECR image digest."
+            exit 1
+          fi
+
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+            echo
+            echo "ERROR: Invalid ECR image digest:"
+            echo "$IMAGE_DIGEST"
+            exit 1
+          fi
+
+          echo "ECR image digest:"
+          echo "$IMAGE_DIGEST"
+
+          echo "image_digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+
+          echo
+          echo "ECR image digest validation passed."
+
 
 
   # ==========================================================
@@ -279,6 +312,7 @@ jobs:
     env:
       ECR_REGISTRY: ${{ needs.push.outputs.ecr_registry }}
       NEW_IMAGE: ${{ needs.push.outputs.image }}
+      NEW_IMAGE_DIGEST: ${{ needs.push.outputs.image_digest }}
 
     steps:
 
@@ -726,11 +760,11 @@ jobs:
           echo "IMAGE VALIDATION"
           echo "=========================================="
 
+          echo
+          echo "===== DEPLOYMENT IMAGE ====="
+
           DEPLOYED_IMAGE="$(
-            kubectl get deployment \
-              "$K8S_DEPLOYMENT" \
-              --namespace "$K8S_NAMESPACE" \
-              -o jsonpath='{.spec.template.spec.containers[0].image}'
+            kubectl get deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}'
           )"
 
           echo "Expected image:"
@@ -742,13 +776,79 @@ jobs:
 
           if [[ "$DEPLOYED_IMAGE" != "$NEW_IMAGE" ]]; then
             echo
-            echo "ERROR: Deployed image does not match expected image."
+            echo "ERROR: Deployment image does not match expected image."
             exit 1
           fi
 
           echo
-          echo "Image validation passed."
+          echo "Deployment image tag validation passed."
 
+          echo
+          echo "===== RUNNING POD IMAGE DIGEST ====="
+
+          PODS="$(
+            kubectl get pods --namespace "$K8S_NAMESPACE" -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" -o json
+          )"
+
+          POD_DIGESTS="$(
+            printf '%s' "$PODS" |
+              jq -r --arg container "$K8S_CONTAINER" '
+                .items[]
+                | .status.containerStatuses[]?
+                | select(.name == $container)
+                | .imageID
+              ' |
+              sed -n 's/.*@\(sha256:[0-9a-fA-F]\{64\}\).*/\1/p' |
+              sort -u
+          )"
+
+          if [[ -z "$POD_DIGESTS" ]]; then
+            echo
+            echo "ERROR: Could not determine running pod image digest."
+            exit 1
+          fi
+
+          echo "Expected ECR image digest:"
+          echo "$NEW_IMAGE_DIGEST"
+
+          echo
+          echo "Running pod image digest(s):"
+          echo "$POD_DIGESTS"
+
+          DIGEST_COUNT="$(
+            printf '%s\n' "$POD_DIGESTS" |
+              sed '/^$/d' |
+              wc -l |
+              tr -d ' '
+          )"
+
+          if [[ "$DIGEST_COUNT" -ne 1 ]]; then
+            echo
+            echo "ERROR: Running pods are using multiple image digests."
+            echo "Digest count: $DIGEST_COUNT"
+            exit 1
+          fi
+
+          RUNNING_DIGEST="$(
+            printf '%s\n' "$POD_DIGESTS" |
+              head -1
+          )"
+
+          if [[ "$RUNNING_DIGEST" != "$NEW_IMAGE_DIGEST" ]]; then
+            echo
+            echo "ERROR: Running pod image digest does not match expected ECR digest."
+            echo "Expected: $NEW_IMAGE_DIGEST"
+            echo "Actual:   $RUNNING_DIGEST"
+            exit 1
+          fi
+
+          echo
+          echo "Running pod image digest validation passed."
+
+          echo
+          echo "=========================================="
+          echo "IMAGE VALIDATION PASSED"
+          echo "=========================================="
 
       # ======================================================
       # ENDPOINTSLICE VALIDATION
