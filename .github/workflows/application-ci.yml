@@ -539,6 +539,7 @@ jobs:
       # ======================================================
       - name: Validate application pods
         id: pod_health
+        if: always()
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -547,24 +548,32 @@ jobs:
           echo "POD VALIDATION"
           echo "=========================================="
 
-          # --------------------------------------------------
-          # DEPLOYMENT REPLICA STATUS
-          # --------------------------------------------------
-
           DESIRED_REPLICAS="$(
-            kubectl get deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" -o jsonpath='{.spec.replicas}'
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.spec.replicas}'
           )"
 
           UPDATED_REPLICAS="$(
-            kubectl get deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" -o jsonpath='{.status.updatedReplicas}'
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.status.updatedReplicas}'
           )"
 
           READY_REPLICAS="$(
-            kubectl get deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" -o jsonpath='{.status.readyReplicas}'
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.status.readyReplicas}'
           )"
 
           AVAILABLE_REPLICAS="$(
-            kubectl get deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" -o jsonpath='{.status.availableReplicas}'
+            kubectl get deployment \
+              "$K8S_DEPLOYMENT" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.status.availableReplicas}'
           )"
 
           DESIRED_REPLICAS="${DESIRED_REPLICAS:-0}"
@@ -572,6 +581,7 @@ jobs:
           READY_REPLICAS="${READY_REPLICAS:-0}"
           AVAILABLE_REPLICAS="${AVAILABLE_REPLICAS:-0}"
 
+          echo
           echo "Desired replicas:   $DESIRED_REPLICAS"
           echo "Updated replicas:   $UPDATED_REPLICAS"
           echo "Ready replicas:     $READY_REPLICAS"
@@ -595,16 +605,15 @@ jobs:
             exit 1
           fi
 
-          # --------------------------------------------------
-          # CURRENT REPLICA SET
-          # --------------------------------------------------
 
           CURRENT_RS="$(
-            kubectl get replicaset --namespace "$K8S_NAMESPACE" -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" -o json |
+            kubectl get rs \
+              --namespace "$K8S_NAMESPACE" \
+              -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" \
+              -o json |
               jq -r '
                 .items
-                | map(select(.status.replicas == (.status.readyReplicas // 0)))
-                | map(select(.status.replicas > 0))
+                | map(select((.spec.replicas // 0) > 0))
                 | sort_by(.metadata.creationTimestamp)
                 | last
                 | .metadata.name // empty
@@ -613,7 +622,7 @@ jobs:
 
           if [[ -z "$CURRENT_RS" ]]; then
             echo
-            echo "ERROR: Could not determine the active ReplicaSet."
+            echo "ERROR: Could not determine active ReplicaSet."
             exit 1
           fi
 
@@ -621,32 +630,33 @@ jobs:
           echo "Active ReplicaSet:"
           echo "$CURRENT_RS"
 
-          # --------------------------------------------------
-          # POD VALIDATION
-          #
-          # Validate only pods owned by the active ReplicaSet.
-          # Do not count old ReplicaSet pods during a rollout.
-          # --------------------------------------------------
+          CURRENT_POD_HASH="$(
+            kubectl get rs \
+              "$CURRENT_RS" \
+              --namespace "$K8S_NAMESPACE" \
+              -o jsonpath='{.metadata.labels.pod-template-hash}'
+          )"
+
+          if [[ -z "$CURRENT_POD_HASH" ]]; then
+            echo
+            echo "ERROR: Could not determine pod-template-hash."
+            exit 1
+          fi
+
+          echo
+          echo "Active pod-template-hash:"
+          echo "$CURRENT_POD_HASH"
 
           PODS="$(
-            kubectl get pods --namespace "$K8S_NAMESPACE" -l "app.kubernetes.io/name=$K8S_DEPLOYMENT" -o json
+            kubectl get pods \
+              --namespace "$K8S_NAMESPACE" \
+              -l "app.kubernetes.io/name=$K8S_DEPLOYMENT,pod-template-hash=$CURRENT_POD_HASH" \
+              -o json
           )"
 
           POD_COUNT="$(
             printf '%s' "$PODS" |
-              jq --arg rs "$CURRENT_RS" '
-                [
-                  .items[]
-                  | select(
-                      any(
-                        .metadata.ownerReferences[]?
-                        | .kind == "ReplicaSet"
-                        and .name == $rs
-                      )
-                    )
-                ]
-                | length
-              '
+              jq '.items | length'
           )"
 
           echo
@@ -656,56 +666,56 @@ jobs:
           if [[ "$POD_COUNT" -ne "$DESIRED_REPLICAS" ]]; then
             echo
             echo "ERROR: Active ReplicaSet pod count does not match desired replicas."
+            echo "Expected: $DESIRED_REPLICAS"
+            echo "Actual:   $POD_COUNT"
             exit 1
           fi
 
-          # --------------------------------------------------
-          # POD READINESS
-          # --------------------------------------------------
-
           NOT_READY="$(
             printf '%s' "$PODS" |
-              jq -r --arg rs "$CURRENT_RS" '
+              jq -r '
                 .items[]
-                | select(
-                    any(
-                      .metadata.ownerReferences[]?
-                      | .kind == "ReplicaSet"
-                      and .name == $rs
-                    )
-                  )
                 | {
-                    name: .metadata.name,
+                    name: (.metadata.name // ""),
                     phase: (.status.phase // ""),
                     ready: (
                       [
                         .status.conditions[]?
                         | select(.type == "Ready")
-                        | .status == "True"
-                      ] | any
+                        | .status
+                      ] | first // ""
                     )
                   }
-                | select(.phase != "Running" or .ready != true)
+                | select(.phase != "Running" or .ready != "True")
                 | "\(.name)|phase=\(.phase)|ready=\(.ready)"
               '
           )"
 
           if [[ -n "$NOT_READY" ]]; then
             echo
-            echo "ERROR: One or more active ReplicaSet pods are not Running and Ready."
+            echo "ERROR: One or more active ReplicaSet pods are unhealthy."
             echo "$NOT_READY"
             exit 1
           fi
 
           echo
-          echo "All active ReplicaSet pods are Running and Ready."
+          echo "Active ReplicaSet pods:"
+          printf '%s' "$PODS" |
+            jq -r '
+              .items[]
+              | "\(.metadata.name)|phase=\(.status.phase)|ready=" +
+                (
+                  [
+                    .status.conditions[]?
+                    | select(.type == "Ready")
+                    | .status
+                  ] | first // "Unknown"
+                )
+            '
+
           echo
-          echo "Pod validation passed."
+          echo "Deployment-aware pod validation passed."
 
-
-      # ======================================================
-      # IMAGE VALIDATION
-      # ======================================================
       - name: Validate deployed image
         id: image_health
         continue-on-error: true
