@@ -2,7 +2,7 @@ replicaCount: 3
 
 image:
   repository: 438064565553.dkr.ecr.ap-south-2.amazonaws.com/demo-app
-  tag: "b5b237d6bfaac13813ade767676caae15d8505a2"
+  tag: "07a7e8ad59eb860736e3ca187819efde84226479"
   pullPolicy: Always
 
 podLabels:
