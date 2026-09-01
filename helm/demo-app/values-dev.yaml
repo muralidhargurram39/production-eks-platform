@@ -1,0 +1,19 @@
+replicaCount: 3
+
+image:
+  repository: 438064565553.dkr.ecr.ap-south-2.amazonaws.com/demo-app
+  tag: "v3"
+
+podLabels:
+  app.kubernetes.io/environment: dev
+
+ingress:
+  enabled: true
+  host: dev.muralidharops.com
+
+networkPolicy:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2

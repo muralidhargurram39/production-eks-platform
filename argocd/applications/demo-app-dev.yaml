@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app-dev
+  namespace: argocd
+spec:
+  project: demo-app
+
+  source:
+    repoURL: https://github.com/muralidhargurram39/production-eks-platform.git
+    targetRevision: main
+    path: helm/demo-app
+    helm:
+      valueFiles:
+        - ../../gitops/apps/demo-app/dev/values.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

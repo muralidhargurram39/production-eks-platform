@@ -1,0 +1,110 @@
+replicaCount: 3
+
+image:
+  repository: 438064565553.dkr.ecr.ap-south-2.amazonaws.com/demo-app
+  tag: "v3"
+  pullPolicy: Always
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: false
+  name: ""
+
+podAnnotations: {}
+
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 101
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: http
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+probes:
+  readiness:
+    path: /
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  liveness:
+    path: /
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+terminationGracePeriodSeconds: 30
+
+rollingUpdate:
+  maxUnavailable: 1
+  maxSurge: 1
+
+revisionHistoryLimit: 5
+progressDeadlineSeconds: 300
+
+ingress:
+  enabled: true
+  className: alb
+
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-south-2:438064565553:certificate/f8a50404-5271-4033-830b-414fe12c4806
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /
+
+  host: dev.muralidharops.com
+  path: /
+  pathType: Prefix
+
+networkPolicy:
+  enabled: true
+
+  ingress:
+    namespaceSelector:
+      matchLabels:
+        environment: dev
+
+    port: 8080
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+volumes:
+  nginxCache:
+    emptyDir: {}
+
+  nginxRun:
+    emptyDir: {}
+
+  nginxTmp:
+    emptyDir: {}
