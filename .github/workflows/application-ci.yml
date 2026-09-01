@@ -469,6 +469,17 @@ jobs:
       # ======================================================
       # DEPLOY NEW IMAGE
       # ======================================================
+      - name: Set deployment change cause
+        run: |
+          set -euo pipefail
+
+          CHANGE_CAUSE="Deploy ${GITHUB_SHA} | ${K8S_DEPLOYMENT} | GitHub Actions run ${GITHUB_RUN_NUMBER}"
+
+          kubectl patch deployment "$K8S_DEPLOYMENT" --namespace "$K8S_NAMESPACE" --type='merge' -p "$(printf '{"spec":{"template":{"metadata":{"annotations":{"kubernetes.io/change-cause":"%s"}}}}}' "$CHANGE_CAUSE")"
+
+          echo "Change cause:"
+          echo "$CHANGE_CAUSE"
+
       - name: Deploy new application version
         id: deploy
         run: |
