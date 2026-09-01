@@ -53,6 +53,42 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate application port
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "APPLICATION PORT VALIDATION"
+          echo "=========================================="
+
+          EXPECTED_PORT="8080"
+
+          NGINX_PORT="$(
+            grep -oE "listen [0-9]+" \
+              application/demo-app/Dockerfile |
+            head -1 |
+            awk '{print $2}'
+          )"
+
+          if [[ -z "$NGINX_PORT" ]]; then
+            echo "ERROR: Could not determine nginx listen port."
+            exit 1
+          fi
+
+          echo "Expected nginx port: $EXPECTED_PORT"
+          echo "Detected nginx port: $NGINX_PORT"
+
+          if [[ "$NGINX_PORT" != "$EXPECTED_PORT" ]]; then
+            echo
+            echo "ERROR: Application port mismatch."
+            echo "Expected: $EXPECTED_PORT"
+            echo "Detected: $NGINX_PORT"
+            exit 1
+          fi
+
+          echo
+          echo "Application port validation passed."
+
       - name: Build Docker image
         run: |
           set -euo pipefail
